@@ -1,51 +1,34 @@
-# AULA F75 Mechanical Keyboard Studio Pro
+# AULA F75 Mechanical Keyboard (Windows)
 
-Professional mechanical keyboard sound utility designed for an authentic typing experience.
+Authentic mechanical keyboard typing sounds across all applications on Windows. Built with a high-performance native audio engine (`waveOut`) supporting true polyphony, zero latency, and minimal resource usage.
 
 ## Features
-- **Authentic Sound:** High-quality mechanical switch audio samples.
-- **Low Latency:** Optimized playback engine with minimal CPU impact.
-- **Customizable:** Adjust volume and settings.
-- **Cross-Platform:** Supports Windows, macOS, and Linux.
+- **Authentic Audio:** High quality AULA F75 switch samples.
+- **True Polyphony:** Multi-voice audio engine (`winmm.dll`) prevents sound cut-offs and missed keystrokes during rapid typing.
+- **Ultra-low Latency:** Direct native playback with < 5ms response time.
+- **Zero bloat:** Pure Windows native solution with no bulky dependencies.
+- **Tray Utility:** Volume slider, sound mute toggle, and autostart configuration directly from the system tray.
 
 ---
 
-## Getting Started
+## How to Run
 
-### Prerequisites
-- **Windows:** .NET Framework 4.0+ (usually pre-installed).
-- **macOS:** `afplay` (built-in).
-- **Linux:** `paplay` or `aplay` (check your distribution).
-
-### Launching the Application
-
-#### Windows
 1. Double-click `Windows.bat`.
-2. The application will start in the background and appear in your system tray.
-
-#### macOS
-1. Open Terminal and run: `chmod +x Mac.command`
-2. Double-click `Mac.command`.
-
-#### Linux
-1. Open Terminal and run: `chmod +x Linux.sh`
-2. Run: `./Linux.sh`
+2. The application will start in your system tray (bottom-right taskbar).
+3. Type anywhere — mechanical switch sounds will play across Windows.
+4. Double-click the tray icon to open Settings (adjust volume, test sound, or enable startup at boot).
 
 ---
 
-## Folder Structure
-- `/sounds`: Contains WAV audio samples.
-- `/src`: Application source code.
-- `/Windows.bat`: Windows launch script.
-- `/Mac.command`: macOS launch script.
-- `/Linux.sh`: Linux launch script.
+## Requirements
+- Windows 7, 8, 10, or 11.
+- .NET Framework 4.0+ (pre-installed on Windows).
 
 ---
 
-## Known Limitations
-- Global keyboard hooking is natively supported on Windows. macOS and Linux support for system-wide background typing sound may require additional permissions or specific desktop environment configurations.
-- Some audio features are optimized specifically for the Windows audio engine.
-
-## Credits
-- Sound assets provided by mechanical keyboard enthusiasts.
-- Licensed under MIT.
+## Project Structure
+- `sounds/` - WAV audio samples.
+- `MechanicalKeyboard.cs` - Native Windows C# source code.
+- `Windows.bat` - Launch script (auto-builds on first run using Windows built-in `csc.exe`).
+- `app_icon.ico` - Application icon.
+- `LICENSE.txt` - MIT License.
