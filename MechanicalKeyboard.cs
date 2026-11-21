@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -66,7 +67,6 @@ namespace MechanicalKeyboardApp
 
         private const int VOICE_COUNT = 16;
         private static IntPtr[] _voices = new IntPtr[VOICE_COUNT];
-        private static WAVEHDR[] _headers = new WAVEHDR[VOICE_COUNT];
         private static int _voiceIndex = 0;
         private static readonly object _voiceLock = new object();
 
@@ -147,8 +147,8 @@ namespace MechanicalKeyboardApp
         public static void UpdateVolume(float vol)
         {
             if (!_initialized) return;
-            float clamped = Math.Max(0f, Math.Min(1.5f, vol));
-            ushort level = (ushort)(Math.Min(1.0f, clamped) * 0xFFFF);
+            float clamped = Math.Max(0f, Math.Min(1.0f, vol));
+            ushort level = (ushort)(clamped * 0xFFFF);
             uint dwVol = (uint)(level | (level << 16));
 
             for (int i = 0; i < VOICE_COUNT; i++)
@@ -260,6 +260,7 @@ namespace MechanicalKeyboardApp
         public static MainForm SettingsForm;
         public static volatile bool IsEnabled = true;
         public static float VolumeLevel = 0.85f;
+        public static int TotalPresses = 0;
 
         private static int _lastVk = 0;
         private static int _lastTick = 0;
@@ -368,6 +369,7 @@ namespace MechanicalKeyboardApp
                 {
                     _lastVk = vk;
                     _lastTick = now;
+                    Interlocked.Increment(ref TotalPresses);
                     WaveAudioEngine.PlayKey(vk);
                 }
             }
@@ -475,16 +477,106 @@ namespace MechanicalKeyboardApp
         private static extern IntPtr GetModuleHandle(string lpModuleName);
     }
 
-    // ─── Settings Window ────────────────────────────────────────────────────────
+    // ─── Fluent UI Custom Components ────────────────────────────────────────────
+    public class FluentCard : Panel
+    {
+        private Color _borderColor = Color.FromArgb(48, 48, 62);
+        private int _borderRadius = 10;
+
+        public FluentCard()
+        {
+            this.DoubleBuffered = true;
+            this.BackColor = Color.FromArgb(28, 28, 38);
+            this.Padding = new Padding(16);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+            using (GraphicsPath path = GetRoundedPath(new Rectangle(0, 0, this.Width - 1, this.Height - 1), _borderRadius))
+            {
+                using (Pen borderPen = new Pen(_borderColor, 1.2f))
+                {
+                    e.Graphics.DrawPath(borderPen, path);
+                }
+            }
+        }
+
+        private static GraphicsPath GetRoundedPath(Rectangle rect, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            int d = radius * 2;
+            path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+            path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+            path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+            path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+    }
+
+    public class FluentButton : Button
+    {
+        public bool IsPrimary { get; set; }
+
+        public FluentButton()
+        {
+            this.FlatStyle = FlatStyle.Flat;
+            this.FlatAppearance.BorderSize = 0;
+            this.Font = new Font("Segoe UI", 9.0f, FontStyle.Bold);
+            this.Cursor = Cursors.Hand;
+            this.Height = 34;
+            this.DoubleBuffered = true;
+        }
+
+        protected override void OnPaint(PaintEventArgs pevent)
+        {
+            pevent.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle rect = new Rectangle(0, 0, this.Width - 1, this.Height - 1);
+
+            Color bgColor = IsPrimary ? Color.FromArgb(124, 58, 237) : Color.FromArgb(40, 40, 54);
+            Color textColor = Color.White;
+
+            using (GraphicsPath path = new GraphicsPath())
+            {
+                int r = 6;
+                path.AddArc(rect.X, rect.Y, r * 2, r * 2, 180, 90);
+                path.AddArc(rect.Right - r * 2, rect.Y, r * 2, r * 2, 270, 90);
+                path.AddArc(rect.Right - r * 2, rect.Bottom - r * 2, r * 2, r * 2, 0, 90);
+                path.AddArc(rect.X, rect.Bottom - r * 2, r * 2, r * 2, 90, 90);
+                path.CloseFigure();
+
+                using (SolidBrush brush = new SolidBrush(bgColor))
+                {
+                    pevent.Graphics.FillPath(brush, path);
+                }
+
+                if (!IsPrimary)
+                {
+                    using (Pen pen = new Pen(Color.FromArgb(60, 60, 80), 1f))
+                    {
+                        pevent.Graphics.DrawPath(pen, path);
+                    }
+                }
+
+                TextRenderer.DrawText(pevent.Graphics, this.Text, this.Font, rect, textColor,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            }
+        }
+    }
+
+    // ─── Settings Window (Fluent Dark Cards) ────────────────────────────────────
     public class MainForm : Form
     {
+        private Label _lblStatusBadge;
         private CheckBox _chkEnabled;
         private TrackBar _tbVolume;
         private Label _lblVolume;
+        private Label _lblPressCount;
         private CheckBox _chkStartup;
-        private Button _btnTest;
-        private Button _btnDesktopShortcut;
-        private Button _btnHide;
+        private System.Windows.Forms.Timer _uiSyncTimer;
 
         public MainForm()
         {
@@ -494,11 +586,11 @@ namespace MechanicalKeyboardApp
         private void InitializeComponent()
         {
             this.Text = "AULA F75 Mechanical Keyboard";
-            this.Size = new Size(420, 360);
+            this.Size = new Size(500, 560);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
-            this.BackColor = Color.FromArgb(24, 24, 32);
+            this.BackColor = Color.FromArgb(18, 18, 24);
             this.ForeColor = Color.FromArgb(235, 235, 245);
             this.Font = new Font("Segoe UI", 9.5f);
 
@@ -508,50 +600,81 @@ namespace MechanicalKeyboardApp
                 try { this.Icon = new Icon(icoPath); } catch { }
             }
 
+            // Top Header
+            Panel topPanel = new Panel();
+            topPanel.Dock = DockStyle.Top;
+            topPanel.Height = 70;
+            topPanel.Padding = new Padding(24, 16, 24, 0);
+
             Label lblTitle = new Label();
-            lblTitle.Text = "AULA F75 Typing Sound";
-            lblTitle.Font = new Font("Segoe UI", 13.5f, FontStyle.Bold);
-            lblTitle.ForeColor = Color.FromArgb(168, 85, 247);
-            lblTitle.Location = new Point(20, 16);
+            lblTitle.Text = "AULA F75 Mechanical Studio";
+            lblTitle.Font = new Font("Segoe UI", 14.0f, FontStyle.Bold);
+            lblTitle.ForeColor = Color.White;
+            lblTitle.Location = new Point(24, 14);
             lblTitle.AutoSize = true;
-            this.Controls.Add(lblTitle);
+            topPanel.Controls.Add(lblTitle);
 
             Label lblSub = new Label();
-            lblSub.Text = "True polyphony mechanical switch audio for Windows";
+            lblSub.Text = "Windows 11 Fluent Native • 16-Channel Hardware Polyphony";
             lblSub.Font = new Font("Segoe UI", 8.5f);
-            lblSub.ForeColor = Color.FromArgb(150, 150, 170);
-            lblSub.Location = new Point(22, 44);
+            lblSub.ForeColor = Color.FromArgb(145, 145, 170);
+            lblSub.Location = new Point(26, 42);
             lblSub.AutoSize = true;
-            this.Controls.Add(lblSub);
+            topPanel.Controls.Add(lblSub);
+
+            _lblStatusBadge = new Label();
+            _lblStatusBadge.Text = Program.IsEnabled ? "● Active" : "● Muted";
+            _lblStatusBadge.Font = new Font("Segoe UI", 9.0f, FontStyle.Bold);
+            _lblStatusBadge.ForeColor = Program.IsEnabled ? Color.FromArgb(16, 185, 129) : Color.FromArgb(245, 158, 11);
+            _lblStatusBadge.Location = new Point(380, 20);
+            _lblStatusBadge.AutoSize = true;
+            topPanel.Controls.Add(_lblStatusBadge);
+
+            this.Controls.Add(topPanel);
+
+            // Container Panel
+            Panel mainContainer = new Panel();
+            mainContainer.Dock = DockStyle.Fill;
+            mainContainer.Padding = new Padding(24, 4, 24, 20);
+
+            // ── Card 1: Audio Playback ──────────────────────────────────────────
+            FluentCard cardAudio = new FluentCard();
+            cardAudio.Dock = DockStyle.Top;
+            cardAudio.Height = 135;
+
+            Label lblCard1Title = new Label();
+            lblCard1Title.Text = "AUDIO & PLAYBACK";
+            lblCard1Title.Font = new Font("Segoe UI", 8.0f, FontStyle.Bold);
+            lblCard1Title.ForeColor = Color.FromArgb(168, 85, 247);
+            lblCard1Title.Location = new Point(16, 12);
+            lblCard1Title.AutoSize = true;
+            cardAudio.Controls.Add(lblCard1Title);
 
             _chkEnabled = new CheckBox();
-            _chkEnabled.Text = "Enable Typing Sounds";
+            _chkEnabled.Text = "Enable Typing Audio";
             _chkEnabled.Font = new Font("Segoe UI", 10.0f, FontStyle.Bold);
-            _chkEnabled.Location = new Point(22, 75);
-            _chkEnabled.Size = new Size(220, 26);
+            _chkEnabled.ForeColor = Color.White;
+            _chkEnabled.Location = new Point(18, 34);
+            _chkEnabled.Size = new Size(200, 26);
             _chkEnabled.Checked = Program.IsEnabled;
             _chkEnabled.CheckedChanged += (s, e) =>
             {
                 Program.IsEnabled = _chkEnabled.Checked;
+                UpdateBadge();
             };
-            this.Controls.Add(_chkEnabled);
-
-            GroupBox grpVol = new GroupBox();
-            grpVol.Text = "Volume Control";
-            grpVol.ForeColor = Color.FromArgb(180, 180, 205);
-            grpVol.Location = new Point(20, 110);
-            grpVol.Size = new Size(365, 85);
+            cardAudio.Controls.Add(_chkEnabled);
 
             _lblVolume = new Label();
             _lblVolume.Text = string.Format("Volume: {0}%", (int)(Program.VolumeLevel * 100));
-            _lblVolume.ForeColor = Color.White;
-            _lblVolume.Location = new Point(15, 22);
+            _lblVolume.Font = new Font("Segoe UI", 9.0f, FontStyle.Regular);
+            _lblVolume.ForeColor = Color.FromArgb(180, 180, 205);
+            _lblVolume.Location = new Point(18, 66);
             _lblVolume.AutoSize = true;
-            grpVol.Controls.Add(_lblVolume);
+            cardAudio.Controls.Add(_lblVolume);
 
             _tbVolume = new TrackBar();
-            _tbVolume.Location = new Point(10, 42);
-            _tbVolume.Size = new Size(345, 35);
+            _tbVolume.Location = new Point(14, 88);
+            _tbVolume.Size = new Size(300, 36);
             _tbVolume.Minimum = 0;
             _tbVolume.Maximum = 100;
             _tbVolume.Value = (int)(Program.VolumeLevel * 100);
@@ -562,55 +685,128 @@ namespace MechanicalKeyboardApp
                 _lblVolume.Text = string.Format("Volume: {0}%", _tbVolume.Value);
                 WaveAudioEngine.UpdateVolume(v);
             };
-            grpVol.Controls.Add(_tbVolume);
-            this.Controls.Add(grpVol);
+            cardAudio.Controls.Add(_tbVolume);
+
+            FluentButton btnTest = new FluentButton();
+            btnTest.Text = "Test Sound";
+            btnTest.IsPrimary = true;
+            btnTest.Location = new Point(328, 80);
+            btnTest.Size = new Size(95, 34);
+            btnTest.Click += (s, e) => WaveAudioEngine.PlaySound("space");
+            cardAudio.Controls.Add(btnTest);
+
+            mainContainer.Controls.Add(cardAudio);
+
+            // Spacer
+            Panel sp1 = new Panel { Dock = DockStyle.Top, Height = 12 };
+            mainContainer.Controls.Add(sp1);
+
+            // ── Card 2: Live Telemetry ──────────────────────────────────────────
+            FluentCard cardStats = new FluentCard();
+            cardStats.Dock = DockStyle.Top;
+            cardStats.Height = 110;
+
+            Label lblCard2Title = new Label();
+            lblCard2Title.Text = "SWITCH & TELEMETRY";
+            lblCard2Title.Font = new Font("Segoe UI", 8.0f, FontStyle.Bold);
+            lblCard2Title.ForeColor = Color.FromArgb(59, 130, 246);
+            lblCard2Title.Location = new Point(16, 12);
+            lblCard2Title.AutoSize = true;
+            cardStats.Controls.Add(lblCard2Title);
+
+            Label lblSwitch = new Label();
+            lblSwitch.Text = "Switch Profile: AULA F75 Reaper (Lubed Linear)";
+            lblSwitch.Font = new Font("Segoe UI", 9.25f, FontStyle.Bold);
+            lblSwitch.ForeColor = Color.FromArgb(230, 230, 245);
+            lblSwitch.Location = new Point(18, 36);
+            lblSwitch.AutoSize = true;
+            cardStats.Controls.Add(lblSwitch);
+
+            _lblPressCount = new Label();
+            _lblPressCount.Text = string.Format("Keystrokes Typed: {0:N0}", Program.TotalPresses);
+            _lblPressCount.Font = new Font("Segoe UI", 9.0f);
+            _lblPressCount.ForeColor = Color.FromArgb(160, 160, 185);
+            _lblPressCount.Location = new Point(18, 62);
+            _lblPressCount.AutoSize = true;
+            cardStats.Controls.Add(_lblPressCount);
+
+            Label lblLatency = new Label();
+            lblLatency.Text = "Engine: Direct waveOut • <5ms Latency";
+            lblLatency.Font = new Font("Segoe UI", 8.5f);
+            lblLatency.ForeColor = Color.FromArgb(16, 185, 129);
+            lblLatency.Location = new Point(18, 84);
+            lblLatency.AutoSize = true;
+            cardStats.Controls.Add(lblLatency);
+
+            mainContainer.Controls.Add(cardStats);
+
+            // Spacer
+            Panel sp2 = new Panel { Dock = DockStyle.Top, Height = 12 };
+            mainContainer.Controls.Add(sp2);
+
+            // ── Card 3: Windows Integration ─────────────────────────────────────
+            FluentCard cardSystem = new FluentCard();
+            cardSystem.Dock = DockStyle.Top;
+            cardSystem.Height = 125;
+
+            Label lblCard3Title = new Label();
+            lblCard3Title.Text = "WINDOWS INTEGRATION";
+            lblCard3Title.Font = new Font("Segoe UI", 8.0f, FontStyle.Bold);
+            lblCard3Title.ForeColor = Color.FromArgb(16, 185, 129);
+            lblCard3Title.Location = new Point(16, 12);
+            lblCard3Title.AutoSize = true;
+            cardSystem.Controls.Add(lblCard3Title);
 
             _chkStartup = new CheckBox();
-            _chkStartup.Text = "Start automatically with Windows";
-            _chkStartup.Location = new Point(22, 205);
-            _chkStartup.Size = new Size(260, 24);
+            _chkStartup.Text = "Start automatically on Windows boot";
+            _chkStartup.ForeColor = Color.White;
+            _chkStartup.Location = new Point(18, 36);
+            _chkStartup.Size = new Size(300, 24);
             _chkStartup.Checked = IsStartupEnabled();
             _chkStartup.CheckedChanged += (s, e) => SetStartupEnabled(_chkStartup.Checked);
-            this.Controls.Add(_chkStartup);
+            cardSystem.Controls.Add(_chkStartup);
 
-            _btnTest = new Button();
-            _btnTest.Text = "Test Sound";
-            _btnTest.Location = new Point(20, 245);
-            _btnTest.Size = new Size(110, 32);
-            _btnTest.FlatStyle = FlatStyle.Flat;
-            _btnTest.BackColor = Color.FromArgb(147, 51, 234);
-            _btnTest.ForeColor = Color.White;
-            _btnTest.Font = new Font("Segoe UI", 9.0f, FontStyle.Bold);
-            _btnTest.Click += (s, e) => WaveAudioEngine.PlaySound("space");
-            this.Controls.Add(_btnTest);
+            FluentButton btnShortcut = new FluentButton();
+            btnShortcut.Text = "Create Desktop Shortcut";
+            btnShortcut.IsPrimary = false;
+            btnShortcut.Location = new Point(18, 72);
+            btnShortcut.Size = new Size(185, 34);
+            btnShortcut.Click += (s, e) => CreateDesktopShortcut();
+            cardSystem.Controls.Add(btnShortcut);
 
-            _btnDesktopShortcut = new Button();
-            _btnDesktopShortcut.Text = "Desktop Shortcut";
-            _btnDesktopShortcut.Location = new Point(140, 245);
-            _btnDesktopShortcut.Size = new Size(130, 32);
-            _btnDesktopShortcut.FlatStyle = FlatStyle.Flat;
-            _btnDesktopShortcut.BackColor = Color.FromArgb(45, 45, 60);
-            _btnDesktopShortcut.ForeColor = Color.White;
-            _btnDesktopShortcut.Click += (s, e) => CreateDesktopShortcut();
-            this.Controls.Add(_btnDesktopShortcut);
+            FluentButton btnHide = new FluentButton();
+            btnHide.Text = "Hide to Tray";
+            btnHide.IsPrimary = false;
+            btnHide.Location = new Point(215, 72);
+            btnHide.Size = new Size(115, 34);
+            btnHide.Click += (s, e) => this.Hide();
+            cardSystem.Controls.Add(btnHide);
 
-            _btnHide = new Button();
-            _btnHide.Text = "Hide to Tray";
-            _btnHide.Location = new Point(280, 245);
-            _btnHide.Size = new Size(105, 32);
-            _btnHide.FlatStyle = FlatStyle.Flat;
-            _btnHide.BackColor = Color.FromArgb(45, 45, 60);
-            _btnHide.ForeColor = Color.White;
-            _btnHide.Click += (s, e) => this.Hide();
-            this.Controls.Add(_btnHide);
+            mainContainer.Controls.Add(cardSystem);
 
-            Label lblHint = new Label();
-            lblHint.Text = "Tip: Runs silently in system tray. Double-click tray icon to reopen.";
-            lblHint.Font = new Font("Segoe UI", 8.0f);
-            lblHint.ForeColor = Color.FromArgb(130, 130, 150);
-            lblHint.Location = new Point(22, 290);
-            lblHint.AutoSize = true;
-            this.Controls.Add(lblHint);
+            this.Controls.Add(mainContainer);
+
+            // UI Refresh Timer for live stats
+            _uiSyncTimer = new System.Windows.Forms.Timer();
+            _uiSyncTimer.Interval = 250;
+            _uiSyncTimer.Tick += (s, e) =>
+            {
+                if (_lblPressCount != null)
+                {
+                    _lblPressCount.Text = string.Format("Keystrokes Typed: {0:N0}", Program.TotalPresses);
+                }
+                UpdateBadge();
+            };
+            _uiSyncTimer.Start();
+        }
+
+        private void UpdateBadge()
+        {
+            if (_lblStatusBadge != null)
+            {
+                _lblStatusBadge.Text = Program.IsEnabled ? "● Active" : "● Muted";
+                _lblStatusBadge.ForeColor = Program.IsEnabled ? Color.FromArgb(16, 185, 129) : Color.FromArgb(245, 158, 11);
+            }
         }
 
         public void SyncState()
@@ -619,6 +815,7 @@ namespace MechanicalKeyboardApp
             {
                 _chkEnabled.Checked = Program.IsEnabled;
             }
+            UpdateBadge();
         }
 
         private static string GetStartupShortcutPath()

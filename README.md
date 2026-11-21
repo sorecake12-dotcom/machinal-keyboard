@@ -50,3 +50,4 @@ Authentic mechanical keyboard typing sounds across all applications on Windows. 
 - `app_icon.ico` - High-resolution application icon.
 - `LICENSE.txt` - MIT License.
 - `README.md` - Documentation.
+
