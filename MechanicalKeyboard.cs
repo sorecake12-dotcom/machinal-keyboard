@@ -40,22 +40,16 @@ namespace MechanicalKeyboardApp
 
         [DllImport("winmm.dll")]
         public static extern int waveOutOpen(out IntPtr hWaveOut, int uDeviceID, ref WAVEFORMATEX lpFormat, IntPtr dwCallback, IntPtr dwInstance, int dwFlags);
-
         [DllImport("winmm.dll")]
         public static extern int waveOutPrepareHeader(IntPtr hWaveOut, ref WAVEHDR lpWaveHdr, int uSize);
-
         [DllImport("winmm.dll")]
         public static extern int waveOutWrite(IntPtr hWaveOut, ref WAVEHDR lpWaveHdr, int uSize);
-
         [DllImport("winmm.dll")]
         public static extern int waveOutReset(IntPtr hWaveOut);
-
         [DllImport("winmm.dll")]
         public static extern int waveOutUnprepareHeader(IntPtr hWaveOut, ref WAVEHDR lpWaveHdr, int uSize);
-
         [DllImport("winmm.dll")]
         public static extern int waveOutClose(IntPtr hWaveOut);
-
         [DllImport("winmm.dll")]
         public static extern int waveOutSetVolume(IntPtr hWaveOut, uint dwVolume);
 
@@ -71,6 +65,7 @@ namespace MechanicalKeyboardApp
         private static readonly object _voiceLock = new object();
 
         private static Dictionary<string, SoundSample> _samples = new Dictionary<string, SoundSample>();
+        public static Dictionary<string, float> KeyVolume = new Dictionary<string, float>();
         private static readonly string[] _randomKeys = { "a", "b", "c", "d", "e", "f" };
         private static Random _rng = new Random();
         private static bool _initialized = false;
@@ -100,6 +95,7 @@ namespace MechanicalKeyboardApp
                 string[] soundNames = { "a", "b", "c", "d", "e", "f", "backspace", "enter", "shift", "space", "tab" };
                 foreach (string name in soundNames)
                 {
+                    KeyVolume[name] = 1.0f;
                     string filePath = Path.Combine(soundsDir, name + ".wav");
                     if (!File.Exists(filePath)) continue;
 
@@ -133,7 +129,6 @@ namespace MechanicalKeyboardApp
                 }
 
                 _initialized = true;
-                UpdateVolume(Program.VolumeLevel);
                 Program.Log("Audio", string.Format("Loaded {0} sound samples and initialized {1} hardware voices.", _samples.Count, VOICE_COUNT));
                 return true;
             }
@@ -144,31 +139,25 @@ namespace MechanicalKeyboardApp
             }
         }
 
-        public static void UpdateVolume(float vol)
-        {
-            if (!_initialized) return;
-            float clamped = Math.Max(0f, Math.Min(1.0f, vol));
-            ushort level = (ushort)(clamped * 0xFFFF);
-            uint dwVol = (uint)(level | (level << 16));
-
-            for (int i = 0; i < VOICE_COUNT; i++)
-            {
-                if (_voices[i] != IntPtr.Zero)
-                {
-                    waveOutSetVolume(_voices[i], dwVol);
-                }
-            }
-        }
-
         public static void PlaySound(string soundName)
         {
-            if (!_initialized || !Program.IsEnabled || Program.VolumeLevel <= 0.01f) return;
+            if (!_initialized || !Program.IsEnabled || Program.MasterVolume <= 0.001f) return;
 
             SoundSample sample;
             if (!_samples.TryGetValue(soundName, out sample))
             {
                 if (!_samples.TryGetValue("a", out sample)) return;
             }
+
+            float keyVol = 1.0f;
+            if (KeyVolume.ContainsKey(soundName))
+            {
+                keyVol = KeyVolume[soundName];
+            }
+
+            float effectiveVol = Math.Max(0f, Math.Min(1.0f, Program.MasterVolume * keyVol));
+            ushort level = (ushort)(effectiveVol * 0xFFFF);
+            uint dwVol = (uint)(level | (level << 16));
 
             lock (_voiceLock)
             {
@@ -178,6 +167,7 @@ namespace MechanicalKeyboardApp
                 IntPtr hVoice = _voices[v];
                 if (hVoice == IntPtr.Zero) return;
 
+                waveOutSetVolume(hVoice, dwVol);
                 waveOutReset(hVoice);
 
                 WAVEHDR hdr = new WAVEHDR();
@@ -259,7 +249,9 @@ namespace MechanicalKeyboardApp
         public static NotifyIcon TrayIcon;
         public static MainForm SettingsForm;
         public static volatile bool IsEnabled = true;
-        public static float VolumeLevel = 0.85f;
+        public static volatile bool PlayOnKeypress = true;
+        public static float MasterVolume = 1.0f;
+        public static int PitchShift = 0;
         public static int TotalPresses = 0;
 
         private static int _lastVk = 0;
@@ -312,7 +304,7 @@ namespace MechanicalKeyboardApp
                 _watchdogTimer.Interval = 60000;
                 _watchdogTimer.Tick += (s, e) =>
                 {
-                    if (_hookID == IntPtr.Zero)
+                    if (_hookID == IntPtr.Zero && PlayOnKeypress)
                     {
                         StartHook();
                     }
@@ -358,13 +350,11 @@ namespace MechanicalKeyboardApp
 
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
-            if (nCode >= 0 && (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN) && IsEnabled)
+            if (nCode >= 0 && (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN) && IsEnabled && PlayOnKeypress)
             {
                 int vk = Marshal.ReadInt32(lParam);
                 int now = Environment.TickCount;
 
-                // Only debounce the exact same key if pressed under 12ms (hardware key chatter)
-                // Different keys chorded together are NEVER dropped!
                 if (vk != _lastVk || (now - _lastTick) >= 12)
                 {
                     _lastVk = vk;
@@ -379,7 +369,7 @@ namespace MechanicalKeyboardApp
         private static void SetupTray()
         {
             TrayIcon = new NotifyIcon();
-            TrayIcon.Text = "AULA F75 Mechanical Keyboard";
+            TrayIcon.Text = "AULA F75 Mechanical Keyboard Studio Pro";
 
             string icoPath = Path.Combine(BaseDir, "app_icon.ico");
             if (File.Exists(icoPath))
@@ -393,13 +383,13 @@ namespace MechanicalKeyboardApp
             }
 
             ContextMenu menu = new ContextMenu();
-            MenuItem openItem = new MenuItem("Open Settings", (s, e) => ShowSettings());
+            MenuItem openItem = new MenuItem("AULA F75 Studio Pro", (s, e) => ShowSettings());
             openItem.DefaultItem = true;
 
-            MenuItem toggleItem = new MenuItem(IsEnabled ? "Mute Sounds" : "Unmute Sounds", (s, e) =>
+            MenuItem toggleItem = new MenuItem(IsEnabled ? "Mute All Audio" : "Unmute Audio", (s, e) =>
             {
                 IsEnabled = !IsEnabled;
-                (s as MenuItem).Text = IsEnabled ? "Mute Sounds" : "Unmute Sounds";
+                (s as MenuItem).Text = IsEnabled ? "Mute All Audio" : "Unmute Audio";
                 if (SettingsForm != null) SettingsForm.SyncState();
             });
 
@@ -410,12 +400,18 @@ namespace MechanicalKeyboardApp
             });
 
             menu.MenuItems.Add(openItem);
+            menu.MenuItems.Add("-");
             menu.MenuItems.Add(toggleItem);
             menu.MenuItems.Add("-");
             menu.MenuItems.Add(exitItem);
 
             TrayIcon.ContextMenu = menu;
             TrayIcon.DoubleClick += (s, e) => ShowSettings();
+            TrayIcon.Click += (s, e) =>
+            {
+                MouseEventArgs me = e as MouseEventArgs;
+                if (me != null && me.Button == MouseButtons.Left) ShowSettings();
+            };
             TrayIcon.Visible = true;
         }
 
@@ -465,29 +461,23 @@ namespace MechanicalKeyboardApp
 
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
-
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
     }
 
-    // ─── Fluent UI Custom Components ────────────────────────────────────────────
-    public class FluentCard : Panel
+    // ─── Custom UI Controls (Exact AULA Studio Pro Aesthetic) ───────────────────
+    public class StudioCard : Panel
     {
-        private Color _borderColor = Color.FromArgb(48, 48, 62);
-        private int _borderRadius = 10;
-
-        public FluentCard()
+        public StudioCard()
         {
             this.DoubleBuffered = true;
-            this.BackColor = Color.FromArgb(28, 28, 38);
-            this.Padding = new Padding(16);
+            this.BackColor = Color.FromArgb(17, 14, 28);
+            this.Padding = new Padding(14);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -495,16 +485,20 @@ namespace MechanicalKeyboardApp
             base.OnPaint(e);
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
 
-            using (GraphicsPath path = GetRoundedPath(new Rectangle(0, 0, this.Width - 1, this.Height - 1), _borderRadius))
+            using (GraphicsPath path = GetRoundedPath(new Rectangle(0, 0, this.Width - 1, this.Height - 1), 10))
             {
-                using (Pen borderPen = new Pen(_borderColor, 1.2f))
+                using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(19, 16, 31)))
+                {
+                    e.Graphics.FillPath(bgBrush, path);
+                }
+                using (Pen borderPen = new Pen(Color.FromArgb(45, 34, 68), 1.2f))
                 {
                     e.Graphics.DrawPath(borderPen, path);
                 }
             }
         }
 
-        private static GraphicsPath GetRoundedPath(Rectangle rect, int radius)
+        public static GraphicsPath GetRoundedPath(Rectangle rect, int radius)
         {
             GraphicsPath path = new GraphicsPath();
             int d = radius * 2;
@@ -517,17 +511,140 @@ namespace MechanicalKeyboardApp
         }
     }
 
-    public class FluentButton : Button
+    public class StudioSlider : Control
+    {
+        private int _value = 100;
+        private int _minimum = 0;
+        private int _maximum = 100;
+        private bool _isDragging = false;
+        public event EventHandler ValueChanged;
+
+        public int Value
+        {
+            get { return _value; }
+            set
+            {
+                int clamped = Math.Max(_minimum, Math.Min(_maximum, value));
+                if (_value != clamped)
+                {
+                    _value = clamped;
+                    this.Invalidate();
+                    if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+                }
+            }
+        }
+
+        public int Minimum { get { return _minimum; } set { _minimum = value; Invalidate(); } }
+        public int Maximum { get { return _maximum; } set { _maximum = value; Invalidate(); } }
+
+        public StudioSlider()
+        {
+            this.SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            this.Height = 22;
+            this.Cursor = Cursors.Hand;
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Left)
+            {
+                _isDragging = true;
+                UpdateValueFromMouse(e.X);
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (_isDragging)
+            {
+                UpdateValueFromMouse(e.X);
+            }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            _isDragging = false;
+        }
+
+        private void UpdateValueFromMouse(int mouseX)
+        {
+            int pad = 8;
+            int trackWidth = this.Width - (pad * 2);
+            if (trackWidth <= 0) return;
+
+            float ratio = (float)(mouseX - pad) / trackWidth;
+            ratio = Math.Max(0f, Math.Min(1f, ratio));
+            this.Value = _minimum + (int)Math.Round(ratio * (_maximum - _minimum));
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            int pad = 8;
+            int trackY = (this.Height / 2) - 3;
+            int trackHeight = 6;
+            int trackWidth = this.Width - (pad * 2);
+
+            float ratio = (_maximum > _minimum) ? (float)(_value - _minimum) / (_maximum - _minimum) : 0f;
+            int fillWidth = (int)(ratio * trackWidth);
+
+            // Background track
+            using (GraphicsPath bgPath = StudioCard.GetRoundedPath(new Rectangle(pad, trackY, trackWidth, trackHeight), 3))
+            {
+                using (SolidBrush trackBrush = new SolidBrush(Color.FromArgb(38, 28, 58)))
+                {
+                    e.Graphics.FillPath(trackBrush, bgPath);
+                }
+            }
+
+            // Filled active track (Neon purple gradient)
+            if (fillWidth > 4)
+            {
+                using (GraphicsPath fillPath = StudioCard.GetRoundedPath(new Rectangle(pad, trackY, fillWidth, trackHeight), 3))
+                {
+                    using (LinearGradientBrush fillBrush = new LinearGradientBrush(
+                        new Rectangle(pad, trackY, Math.Max(10, fillWidth), trackHeight),
+                        Color.FromArgb(139, 92, 246), Color.FromArgb(192, 132, 252), LinearGradientMode.Horizontal))
+                    {
+                        e.Graphics.FillPath(fillBrush, fillPath);
+                    }
+                }
+            }
+
+            // Circular thumb with neon glow
+            int thumbX = pad + fillWidth;
+            int thumbY = this.Height / 2;
+            int thumbRadius = 7;
+
+            using (SolidBrush glowBrush = new SolidBrush(Color.FromArgb(70, 168, 85, 247)))
+            {
+                e.Graphics.FillEllipse(glowBrush, thumbX - thumbRadius - 2, thumbY - thumbRadius - 2, (thumbRadius + 2) * 2, (thumbRadius + 2) * 2);
+            }
+            using (SolidBrush thumbBrush = new SolidBrush(Color.FromArgb(216, 180, 254)))
+            {
+                e.Graphics.FillEllipse(thumbBrush, thumbX - thumbRadius, thumbY - thumbRadius, thumbRadius * 2, thumbRadius * 2);
+            }
+            using (Pen thumbPen = new Pen(Color.White, 1.2f))
+            {
+                e.Graphics.DrawEllipse(thumbPen, thumbX - thumbRadius, thumbY - thumbRadius, thumbRadius * 2, thumbRadius * 2);
+            }
+        }
+    }
+
+    public class StudioPillButton : Button
     {
         public bool IsPrimary { get; set; }
+        public bool IsActiveTab { get; set; }
 
-        public FluentButton()
+        public StudioPillButton()
         {
             this.FlatStyle = FlatStyle.Flat;
             this.FlatAppearance.BorderSize = 0;
             this.Font = new Font("Segoe UI", 9.0f, FontStyle.Bold);
             this.Cursor = Cursors.Hand;
-            this.Height = 34;
             this.DoubleBuffered = true;
         }
 
@@ -536,26 +653,23 @@ namespace MechanicalKeyboardApp
             pevent.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle rect = new Rectangle(0, 0, this.Width - 1, this.Height - 1);
 
-            Color bgColor = IsPrimary ? Color.FromArgb(124, 58, 237) : Color.FromArgb(40, 40, 54);
-            Color textColor = Color.White;
+            Color bgColor;
+            if (IsActiveTab) bgColor = Color.FromArgb(109, 40, 217);
+            else if (IsPrimary) bgColor = Color.FromArgb(124, 58, 237);
+            else bgColor = Color.FromArgb(28, 22, 44);
 
-            using (GraphicsPath path = new GraphicsPath())
+            Color textColor = (IsActiveTab || IsPrimary) ? Color.White : Color.FromArgb(190, 190, 215);
+
+            using (GraphicsPath path = StudioCard.GetRoundedPath(rect, 6))
             {
-                int r = 6;
-                path.AddArc(rect.X, rect.Y, r * 2, r * 2, 180, 90);
-                path.AddArc(rect.Right - r * 2, rect.Y, r * 2, r * 2, 270, 90);
-                path.AddArc(rect.Right - r * 2, rect.Bottom - r * 2, r * 2, r * 2, 0, 90);
-                path.AddArc(rect.X, rect.Bottom - r * 2, r * 2, r * 2, 90, 90);
-                path.CloseFigure();
-
                 using (SolidBrush brush = new SolidBrush(bgColor))
                 {
                     pevent.Graphics.FillPath(brush, path);
                 }
 
-                if (!IsPrimary)
+                if (!IsPrimary && !IsActiveTab)
                 {
-                    using (Pen pen = new Pen(Color.FromArgb(60, 60, 80), 1f))
+                    using (Pen pen = new Pen(Color.FromArgb(60, 46, 88), 1f))
                     {
                         pevent.Graphics.DrawPath(pen, path);
                     }
@@ -567,16 +681,29 @@ namespace MechanicalKeyboardApp
         }
     }
 
-    // ─── Settings Window (Fluent Dark Cards) ────────────────────────────────────
+    // ─── Main Form (Matches Exact UI in Uploaded Image) ─────────────────────────
     public class MainForm : Form
     {
-        private Label _lblStatusBadge;
-        private CheckBox _chkEnabled;
-        private TrackBar _tbVolume;
-        private Label _lblVolume;
-        private Label _lblPressCount;
-        private CheckBox _chkStartup;
-        private System.Windows.Forms.Timer _uiSyncTimer;
+        private StudioSlider _slMasterVol;
+        private Label _lblMasterVol;
+        private CheckBox _chkMuteAll;
+        private StudioSlider _slPitch;
+        private Label _lblPitch;
+        private CheckBox _chkSyncSys;
+        private CheckBox _chkAutoLaunch;
+        private CheckBox _chkPlayOnKey;
+        private Label _lblBottomStatus;
+
+        private Dictionary<string, StudioSlider> _keySliders = new Dictionary<string, StudioSlider>();
+        private Dictionary<string, Label> _keyPctLabels = new Dictionary<string, Label>();
+
+        // Custom Window Dragger Win32
+        [DllImport("user32.dll")]
+        public static extern int SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
+        [DllImport("user32.dll")]
+        public static extern bool ReleaseCapture();
+        private const int WM_NCLBUTTONDOWN = 0xA1;
+        private const int HT_CAPTION = 0x2;
 
         public MainForm()
         {
@@ -585,14 +712,13 @@ namespace MechanicalKeyboardApp
 
         private void InitializeComponent()
         {
-            this.Text = "AULA F75 Mechanical Keyboard";
-            this.Size = new Size(500, 560);
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.Size = new Size(1040, 680);
             this.StartPosition = FormStartPosition.CenterScreen;
-            this.FormBorderStyle = FormBorderStyle.FixedDialog;
-            this.MaximizeBox = false;
-            this.BackColor = Color.FromArgb(18, 18, 24);
+            this.BackColor = Color.FromArgb(13, 11, 20);
             this.ForeColor = Color.FromArgb(235, 235, 245);
-            this.Font = new Font("Segoe UI", 9.5f);
+            this.Font = new Font("Segoe UI", 9.0f);
+            this.DoubleBuffered = true;
 
             string icoPath = Path.Combine(Program.BaseDir, "app_icon.ico");
             if (File.Exists(icoPath))
@@ -600,222 +726,426 @@ namespace MechanicalKeyboardApp
                 try { this.Icon = new Icon(icoPath); } catch { }
             }
 
-            // Top Header
-            Panel topPanel = new Panel();
-            topPanel.Dock = DockStyle.Top;
-            topPanel.Height = 70;
-            topPanel.Padding = new Padding(24, 16, 24, 0);
-
-            Label lblTitle = new Label();
-            lblTitle.Text = "AULA F75 Mechanical Studio";
-            lblTitle.Font = new Font("Segoe UI", 14.0f, FontStyle.Bold);
-            lblTitle.ForeColor = Color.White;
-            lblTitle.Location = new Point(24, 14);
-            lblTitle.AutoSize = true;
-            topPanel.Controls.Add(lblTitle);
-
-            Label lblSub = new Label();
-            lblSub.Text = "Windows 11 Fluent Native • 16-Channel Hardware Polyphony";
-            lblSub.Font = new Font("Segoe UI", 8.5f);
-            lblSub.ForeColor = Color.FromArgb(145, 145, 170);
-            lblSub.Location = new Point(26, 42);
-            lblSub.AutoSize = true;
-            topPanel.Controls.Add(lblSub);
-
-            _lblStatusBadge = new Label();
-            _lblStatusBadge.Text = Program.IsEnabled ? "● Active" : "● Muted";
-            _lblStatusBadge.Font = new Font("Segoe UI", 9.0f, FontStyle.Bold);
-            _lblStatusBadge.ForeColor = Program.IsEnabled ? Color.FromArgb(16, 185, 129) : Color.FromArgb(245, 158, 11);
-            _lblStatusBadge.Location = new Point(380, 20);
-            _lblStatusBadge.AutoSize = true;
-            topPanel.Controls.Add(_lblStatusBadge);
-
-            this.Controls.Add(topPanel);
-
-            // Container Panel
-            Panel mainContainer = new Panel();
-            mainContainer.Dock = DockStyle.Fill;
-            mainContainer.Padding = new Padding(24, 4, 24, 20);
-
-            // ── Card 1: Audio Playback ──────────────────────────────────────────
-            FluentCard cardAudio = new FluentCard();
-            cardAudio.Dock = DockStyle.Top;
-            cardAudio.Height = 135;
-
-            Label lblCard1Title = new Label();
-            lblCard1Title.Text = "AUDIO & PLAYBACK";
-            lblCard1Title.Font = new Font("Segoe UI", 8.0f, FontStyle.Bold);
-            lblCard1Title.ForeColor = Color.FromArgb(168, 85, 247);
-            lblCard1Title.Location = new Point(16, 12);
-            lblCard1Title.AutoSize = true;
-            cardAudio.Controls.Add(lblCard1Title);
-
-            _chkEnabled = new CheckBox();
-            _chkEnabled.Text = "Enable Typing Audio";
-            _chkEnabled.Font = new Font("Segoe UI", 10.0f, FontStyle.Bold);
-            _chkEnabled.ForeColor = Color.White;
-            _chkEnabled.Location = new Point(18, 34);
-            _chkEnabled.Size = new Size(200, 26);
-            _chkEnabled.Checked = Program.IsEnabled;
-            _chkEnabled.CheckedChanged += (s, e) =>
+            // ── Top Titlebar ────────────────────────────────────────────────────────
+            Panel titleBar = new Panel { Dock = DockStyle.Top, Height = 36, BackColor = Color.FromArgb(15, 12, 24) };
+            titleBar.MouseDown += (s, e) =>
             {
-                Program.IsEnabled = _chkEnabled.Checked;
-                UpdateBadge();
-            };
-            cardAudio.Controls.Add(_chkEnabled);
-
-            _lblVolume = new Label();
-            _lblVolume.Text = string.Format("Volume: {0}%", (int)(Program.VolumeLevel * 100));
-            _lblVolume.Font = new Font("Segoe UI", 9.0f, FontStyle.Regular);
-            _lblVolume.ForeColor = Color.FromArgb(180, 180, 205);
-            _lblVolume.Location = new Point(18, 66);
-            _lblVolume.AutoSize = true;
-            cardAudio.Controls.Add(_lblVolume);
-
-            _tbVolume = new TrackBar();
-            _tbVolume.Location = new Point(14, 88);
-            _tbVolume.Size = new Size(300, 36);
-            _tbVolume.Minimum = 0;
-            _tbVolume.Maximum = 100;
-            _tbVolume.Value = (int)(Program.VolumeLevel * 100);
-            _tbVolume.Scroll += (s, e) =>
-            {
-                float v = _tbVolume.Value / 100f;
-                Program.VolumeLevel = v;
-                _lblVolume.Text = string.Format("Volume: {0}%", _tbVolume.Value);
-                WaveAudioEngine.UpdateVolume(v);
-            };
-            cardAudio.Controls.Add(_tbVolume);
-
-            FluentButton btnTest = new FluentButton();
-            btnTest.Text = "Test Sound";
-            btnTest.IsPrimary = true;
-            btnTest.Location = new Point(328, 80);
-            btnTest.Size = new Size(95, 34);
-            btnTest.Click += (s, e) => WaveAudioEngine.PlaySound("space");
-            cardAudio.Controls.Add(btnTest);
-
-            mainContainer.Controls.Add(cardAudio);
-
-            // Spacer
-            Panel sp1 = new Panel { Dock = DockStyle.Top, Height = 12 };
-            mainContainer.Controls.Add(sp1);
-
-            // ── Card 2: Live Telemetry ──────────────────────────────────────────
-            FluentCard cardStats = new FluentCard();
-            cardStats.Dock = DockStyle.Top;
-            cardStats.Height = 110;
-
-            Label lblCard2Title = new Label();
-            lblCard2Title.Text = "SWITCH & TELEMETRY";
-            lblCard2Title.Font = new Font("Segoe UI", 8.0f, FontStyle.Bold);
-            lblCard2Title.ForeColor = Color.FromArgb(59, 130, 246);
-            lblCard2Title.Location = new Point(16, 12);
-            lblCard2Title.AutoSize = true;
-            cardStats.Controls.Add(lblCard2Title);
-
-            Label lblSwitch = new Label();
-            lblSwitch.Text = "Switch Profile: AULA F75 Reaper (Lubed Linear)";
-            lblSwitch.Font = new Font("Segoe UI", 9.25f, FontStyle.Bold);
-            lblSwitch.ForeColor = Color.FromArgb(230, 230, 245);
-            lblSwitch.Location = new Point(18, 36);
-            lblSwitch.AutoSize = true;
-            cardStats.Controls.Add(lblSwitch);
-
-            _lblPressCount = new Label();
-            _lblPressCount.Text = string.Format("Keystrokes Typed: {0:N0}", Program.TotalPresses);
-            _lblPressCount.Font = new Font("Segoe UI", 9.0f);
-            _lblPressCount.ForeColor = Color.FromArgb(160, 160, 185);
-            _lblPressCount.Location = new Point(18, 62);
-            _lblPressCount.AutoSize = true;
-            cardStats.Controls.Add(_lblPressCount);
-
-            Label lblLatency = new Label();
-            lblLatency.Text = "Engine: Direct waveOut • <5ms Latency";
-            lblLatency.Font = new Font("Segoe UI", 8.5f);
-            lblLatency.ForeColor = Color.FromArgb(16, 185, 129);
-            lblLatency.Location = new Point(18, 84);
-            lblLatency.AutoSize = true;
-            cardStats.Controls.Add(lblLatency);
-
-            mainContainer.Controls.Add(cardStats);
-
-            // Spacer
-            Panel sp2 = new Panel { Dock = DockStyle.Top, Height = 12 };
-            mainContainer.Controls.Add(sp2);
-
-            // ── Card 3: Windows Integration ─────────────────────────────────────
-            FluentCard cardSystem = new FluentCard();
-            cardSystem.Dock = DockStyle.Top;
-            cardSystem.Height = 125;
-
-            Label lblCard3Title = new Label();
-            lblCard3Title.Text = "WINDOWS INTEGRATION";
-            lblCard3Title.Font = new Font("Segoe UI", 8.0f, FontStyle.Bold);
-            lblCard3Title.ForeColor = Color.FromArgb(16, 185, 129);
-            lblCard3Title.Location = new Point(16, 12);
-            lblCard3Title.AutoSize = true;
-            cardSystem.Controls.Add(lblCard3Title);
-
-            _chkStartup = new CheckBox();
-            _chkStartup.Text = "Start automatically on Windows boot";
-            _chkStartup.ForeColor = Color.White;
-            _chkStartup.Location = new Point(18, 36);
-            _chkStartup.Size = new Size(300, 24);
-            _chkStartup.Checked = IsStartupEnabled();
-            _chkStartup.CheckedChanged += (s, e) => SetStartupEnabled(_chkStartup.Checked);
-            cardSystem.Controls.Add(_chkStartup);
-
-            FluentButton btnShortcut = new FluentButton();
-            btnShortcut.Text = "Create Desktop Shortcut";
-            btnShortcut.IsPrimary = false;
-            btnShortcut.Location = new Point(18, 72);
-            btnShortcut.Size = new Size(185, 34);
-            btnShortcut.Click += (s, e) => CreateDesktopShortcut();
-            cardSystem.Controls.Add(btnShortcut);
-
-            FluentButton btnHide = new FluentButton();
-            btnHide.Text = "Hide to Tray";
-            btnHide.IsPrimary = false;
-            btnHide.Location = new Point(215, 72);
-            btnHide.Size = new Size(115, 34);
-            btnHide.Click += (s, e) => this.Hide();
-            cardSystem.Controls.Add(btnHide);
-
-            mainContainer.Controls.Add(cardSystem);
-
-            this.Controls.Add(mainContainer);
-
-            // UI Refresh Timer for live stats
-            _uiSyncTimer = new System.Windows.Forms.Timer();
-            _uiSyncTimer.Interval = 250;
-            _uiSyncTimer.Tick += (s, e) =>
-            {
-                if (_lblPressCount != null)
+                if (e.Button == MouseButtons.Left)
                 {
-                    _lblPressCount.Text = string.Format("Keystrokes Typed: {0:N0}", Program.TotalPresses);
+                    ReleaseCapture();
+                    SendMessage(this.Handle, WM_NCLBUTTONDOWN, HT_CAPTION, 0);
                 }
-                UpdateBadge();
             };
-            _uiSyncTimer.Start();
+
+            Label lblLogo = new Label
+            {
+                Text = "⌨",
+                ForeColor = Color.FromArgb(168, 85, 247),
+                Font = new Font("Segoe UI", 12.0f, FontStyle.Bold),
+                Location = new Point(14, 6),
+                AutoSize = true
+            };
+            titleBar.Controls.Add(lblLogo);
+
+            Label lblAppTitle = new Label
+            {
+                Text = "AULA F75 Mechanical Keyboard Studio Pro",
+                ForeColor = Color.FromArgb(220, 220, 240),
+                Font = new Font("Segoe UI", 9.0f, FontStyle.Regular),
+                Location = new Point(42, 9),
+                AutoSize = true
+            };
+            lblAppTitle.MouseDown += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(this.Handle, WM_NCLBUTTONDOWN, HT_CAPTION, 0); }
+            };
+            titleBar.Controls.Add(lblAppTitle);
+
+            // Window control buttons
+            Button btnClose = CreateTitleButton("✕", 1000, 4);
+            btnClose.Click += (s, e) => this.Hide();
+            titleBar.Controls.Add(btnClose);
+
+            Button btnMin = CreateTitleButton("—", 965, 4);
+            btnMin.Click += (s, e) => this.Hide();
+            titleBar.Controls.Add(btnMin);
+
+            this.Controls.Add(titleBar);
+
+            // ── Left Sidebar Navigation ─────────────────────────────────────────────
+            Panel sideBar = new Panel { Dock = DockStyle.Left, Width = 74, BackColor = Color.FromArgb(15, 12, 24) };
+            sideBar.Padding = new Padding(8, 20, 8, 0);
+
+            sideBar.Controls.Add(CreateNavButton("ℹ\nAbout", 260, false));
+            sideBar.Controls.Add(CreateNavButton("🎨\nTheme", 180, false));
+            sideBar.Controls.Add(CreateNavButton("⚙\nSettings", 100, false));
+            sideBar.Controls.Add(CreateNavButton("⌂\nMain", 20, true)); // Active
+
+            this.Controls.Add(sideBar);
+
+            // ── Bottom Status Bar ───────────────────────────────────────────────────
+            Panel statusBar = new Panel { Dock = DockStyle.Bottom, Height = 28, BackColor = Color.FromArgb(11, 9, 17) };
+            _lblBottomStatus = new Label
+            {
+                Text = "🟣  Mechanical Keyboard Studio Pro - Ready",
+                ForeColor = Color.FromArgb(160, 160, 185),
+                Font = new Font("Segoe UI", 8.25f),
+                Location = new Point(14, 6),
+                AutoSize = true
+            };
+            statusBar.Controls.Add(_lblBottomStatus);
+
+            Label lblTrayHint = new Label
+            {
+                Text = "Right-click tray icon to manage or exit",
+                ForeColor = Color.FromArgb(110, 110, 135),
+                Font = new Font("Segoe UI", 8.25f),
+                Location = new Point(780, 6),
+                AutoSize = true
+            };
+            statusBar.Controls.Add(lblTrayHint);
+
+            this.Controls.Add(statusBar);
+
+            // ── Central Workspace (Scrollable or 2-Column Grid) ─────────────────────
+            Panel workPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(13, 11, 20),
+                Padding = new Padding(20, 10, 20, 10),
+                AutoScroll = true
+            };
+
+            // 1. Hero Header Banner
+            Panel heroBanner = new Panel { Dock = DockStyle.Top, Height = 74 };
+            Label heroIcon = new Label
+            {
+                Text = "⌨",
+                Font = new Font("Segoe UI", 32.0f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(168, 85, 247),
+                Location = new Point(6, 6),
+                Size = new Size(54, 54)
+            };
+            heroBanner.Controls.Add(heroIcon);
+
+            Label heroTitle = new Label
+            {
+                Text = "AULA F75",
+                Font = new Font("Segoe UI", 18.0f, FontStyle.Bold),
+                ForeColor = Color.White,
+                Location = new Point(64, 8),
+                AutoSize = true
+            };
+            heroBanner.Controls.Add(heroTitle);
+
+            Label heroSub = new Label
+            {
+                Text = "Mechanical Keyboard Studio Pro",
+                Font = new Font("Segoe UI", 9.5f),
+                ForeColor = Color.FromArgb(180, 160, 220),
+                Location = new Point(66, 38),
+                AutoSize = true
+            };
+            heroBanner.Controls.Add(heroSub);
+
+            Label heroSlogan = new Label
+            {
+                Text = "Type. Play. Feel the Sound.",
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Italic),
+                ForeColor = Color.FromArgb(192, 132, 252),
+                Location = new Point(730, 24),
+                AutoSize = true
+            };
+            heroBanner.Controls.Add(heroSlogan);
+
+            workPanel.Controls.Add(heroBanner);
+
+            // 2. Main Content Split Panels (Left & Right)
+            Panel contentContainer = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+
+            int colWidth = 450;
+
+            // ── LEFT COLUMN ─────────────────────────────────────────────────────────
+            Panel leftCol = new Panel { Location = new Point(4, 80), Width = colWidth, Height = 510 };
+
+            // Card A: Master Controls
+            StudioCard cardMaster = new StudioCard { Location = new Point(0, 0), Width = colWidth, Height = 195 };
+
+            Label lblH1 = CreateCardHeader("🔊  Master Controls", 14, 12, Color.FromArgb(230, 230, 245));
+            cardMaster.Controls.Add(lblH1);
+
+            Label lblMVolTitle = new Label { Text = "Master Volume", Location = new Point(16, 40), ForeColor = Color.White, AutoSize = true };
+            cardMaster.Controls.Add(lblMVolTitle);
+
+            _lblMasterVol = new Label { Text = "100%", Location = new Point(360, 40), ForeColor = Color.FromArgb(192, 132, 252), Font = new Font("Segoe UI", 9.0f, FontStyle.Bold), AutoSize = true };
+            cardMaster.Controls.Add(_lblMasterVol);
+
+            _slMasterVol = new StudioSlider { Location = new Point(14, 62), Width = 410, Value = (int)(Program.MasterVolume * 100) };
+            _slMasterVol.ValueChanged += (s, e) =>
+            {
+                Program.MasterVolume = _slMasterVol.Value / 100f;
+                _lblMasterVol.Text = string.Format("{0}%", _slMasterVol.Value);
+            };
+            cardMaster.Controls.Add(_slMasterVol);
+
+            _chkMuteAll = new CheckBox { Text = "Mute All Audio", Location = new Point(16, 96), ForeColor = Color.FromArgb(210, 210, 230), AutoSize = true };
+            _chkMuteAll.Checked = !Program.IsEnabled;
+            _chkMuteAll.CheckedChanged += (s, e) =>
+            {
+                Program.IsEnabled = !_chkMuteAll.Checked;
+                SyncState();
+            };
+            cardMaster.Controls.Add(_chkMuteAll);
+
+            Label lblEffect = new Label { Text = "Effect:", Location = new Point(230, 97), ForeColor = Color.FromArgb(170, 170, 195), AutoSize = true };
+            cardMaster.Controls.Add(lblEffect);
+
+            ComboBox cbEffect = CreateDarkComboBox(new string[] { "None", "Echo", "Reverb", "Studio Room" }, "Echo", 276, 94, 130);
+            cardMaster.Controls.Add(cbEffect);
+
+            Label lblPitchTitle = new Label { Text = "Pitch Shift", Location = new Point(16, 128), ForeColor = Color.White, AutoSize = true };
+            cardMaster.Controls.Add(lblPitchTitle);
+
+            _lblPitch = new Label { Text = "+0 st", Location = new Point(370, 128), ForeColor = Color.FromArgb(192, 132, 252), Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), AutoSize = true };
+            cardMaster.Controls.Add(_lblPitch);
+
+            _slPitch = new StudioSlider { Location = new Point(120, 126), Width = 240, Minimum = -12, Maximum = 12, Value = 0 };
+            _slPitch.ValueChanged += (s, e) =>
+            {
+                Program.PitchShift = _slPitch.Value;
+                _lblPitch.Text = (_slPitch.Value >= 0 ? "+" : "") + _slPitch.Value + " st";
+            };
+            cardMaster.Controls.Add(_slPitch);
+
+            Label lblSysVol = new Label { Text = "System Volume: 86% (Read-only info)", Location = new Point(16, 162), ForeColor = Color.FromArgb(130, 130, 155), Font = new Font("Segoe UI", 7.75f), AutoSize = true };
+            cardMaster.Controls.Add(lblSysVol);
+
+            _chkSyncSys = new CheckBox { Text = "Sync to system (OFF by default)", Location = new Point(215, 160), ForeColor = Color.FromArgb(170, 170, 195), Font = new Font("Segoe UI", 7.75f), AutoSize = true, Checked = false };
+            cardMaster.Controls.Add(_chkSyncSys);
+
+            leftCol.Controls.Add(cardMaster);
+
+            // Card B: Per-Key Volume Balancer
+            StudioCard cardPerKey = new StudioCard { Location = new Point(0, 205), Width = colWidth, Height = 295 };
+
+            Label lblH2 = CreateCardHeader("⌨  Per-Key Volume Balancer", 14, 12, Color.FromArgb(230, 230, 245));
+            cardPerKey.Controls.Add(lblH2);
+
+            Label lblSubH2 = new Label { Text = "WAV Amplitude Scaling", Location = new Point(285, 14), ForeColor = Color.FromArgb(130, 130, 155), Font = new Font("Segoe UI", 8.0f), AutoSize = true };
+            cardPerKey.Controls.Add(lblSubH2);
+
+            // Scrollable Panel for Keys
+            Panel keyListPanel = new Panel { Location = new Point(10, 40), Width = 430, Height = 240, AutoScroll = true };
+
+            string[] keyRows = { "A", "B", "C", "D", "E", "F", "Backspace", "Enter", "Space", "Tab", "Shift" };
+            int rowY = 0;
+            foreach (string kName in keyRows)
+            {
+                string soundKey = kName.ToLower();
+                Panel row = new Panel { Location = new Point(4, rowY), Width = 400, Height = 28 };
+
+                Label lblK = new Label { Text = kName, Location = new Point(4, 5), ForeColor = Color.FromArgb(230, 230, 245), Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), Width = 70 };
+                row.Controls.Add(lblK);
+
+                StudioSlider sl = new StudioSlider { Location = new Point(80, 4), Width = 175, Value = 100 };
+                _keySliders[soundKey] = sl;
+
+                Label lblVal = new Label { Text = "100%", Location = new Point(265, 5), ForeColor = Color.FromArgb(192, 132, 252), Font = new Font("Segoe UI", 8.0f), Width = 40 };
+                _keyPctLabels[soundKey] = lblVal;
+
+                sl.ValueChanged += (s, e) =>
+                {
+                    float factor = sl.Value / 100f;
+                    WaveAudioEngine.KeyVolume[soundKey] = factor;
+                    lblVal.Text = string.Format("{0}%", sl.Value);
+                };
+                row.Controls.Add(sl);
+                row.Controls.Add(lblVal);
+
+                StudioPillButton btnTest = new StudioPillButton { Text = "Test", Location = new Point(315, 2), Width = 55, Height = 22, Font = new Font("Segoe UI", 7.5f, FontStyle.Bold), IsPrimary = true };
+                btnTest.Click += (s, e) => WaveAudioEngine.PlaySound(soundKey);
+                row.Controls.Add(btnTest);
+
+                keyListPanel.Controls.Add(row);
+                rowY += 30;
+            }
+
+            cardPerKey.Controls.Add(keyListPanel);
+            leftCol.Controls.Add(cardPerKey);
+
+            contentContainer.Controls.Add(leftCol);
+
+            // ── RIGHT COLUMN ────────────────────────────────────────────────────────
+            Panel rightCol = new Panel { Location = new Point(470, 80), Width = 465, Height = 510 };
+
+            // Card C: Customization & Settings
+            StudioCard cardCustom = new StudioCard { Location = new Point(0, 0), Width = 465, Height = 220 };
+
+            Label lblH3 = CreateCardHeader("⚙  Customization & Settings", 14, 12, Color.FromArgb(230, 230, 245));
+            cardCustom.Controls.Add(lblH3);
+
+            AddDropdownRow(cardCustom, "Sound Pack", new string[] { "sounds (Default AULA F75)", "Cream Yellow Switches", "Holy Panda Thock" }, 0, 38);
+            AddDropdownRow(cardCustom, "Theme", new string[] { "Dark Neon (Obsidian & Violet)", "Cyberpunk Blue", "Deep Charcoal" }, 0, 82);
+            AddDropdownRow(cardCustom, "Keycap Style", new string[] { "Neon Violet", "Retro Classic", "RGB Wave" }, 0, 126);
+            AddDropdownRow(cardCustom, "Keyboard Layout", new string[] { "QWERTY (Standard)", "AZERTY", "QWERTZ" }, 0, 170);
+
+            rightCol.Controls.Add(cardCustom);
+
+            // Card D: System & Hook Options
+            StudioCard cardSys = new StudioCard { Location = new Point(0, 230), Width = 465, Height = 145 };
+
+            Label lblH4 = CreateCardHeader("System & Hook Options", 14, 12, Color.FromArgb(230, 230, 245));
+            cardSys.Controls.Add(lblH4);
+
+            _chkAutoLaunch = new CheckBox { Text = "Start with Windows (Auto-launch on boot)", Location = new Point(16, 36), ForeColor = Color.White, AutoSize = true };
+            _chkAutoLaunch.Checked = IsStartupEnabled();
+            _chkAutoLaunch.CheckedChanged += (s, e) => SetStartupEnabled(_chkAutoLaunch.Checked);
+            cardSys.Controls.Add(_chkAutoLaunch);
+
+            _chkPlayOnKey = new CheckBox { Text = "Play on Keypress (Global OS hook)", Location = new Point(16, 62), ForeColor = Color.White, AutoSize = true, Checked = true };
+            _chkPlayOnKey.CheckedChanged += (s, e) =>
+            {
+                Program.PlayOnKeypress = _chkPlayOnKey.Checked;
+                if (!Program.PlayOnKeypress) Program.Unhook();
+                else Program.StartHook();
+            };
+            cardSys.Controls.Add(_chkPlayOnKey);
+
+            StudioPillButton btnOpenFolder = new StudioPillButton { Text = "📁  Open Sound Folder", Location = new Point(16, 94), Width = 180, Height = 32 };
+            btnOpenFolder.Click += (s, e) =>
+            {
+                string p = Path.Combine(Program.BaseDir, "sounds");
+                if (Directory.Exists(p)) Process.Start("explorer.exe", p);
+            };
+            cardSys.Controls.Add(btnOpenFolder);
+
+            StudioPillButton btnReset = new StudioPillButton { Text = "🔄  Reset Defaults", Location = new Point(206, 94), Width = 150, Height = 32 };
+            btnReset.Click += (s, e) => ResetDefaults();
+            cardSys.Controls.Add(btnReset);
+
+            rightCol.Controls.Add(cardSys);
+
+            // Card E: Engine Status
+            StudioCard cardStatus = new StudioCard { Location = new Point(0, 385), Width = 465, Height = 115 };
+
+            Label lblH5 = CreateCardHeader("Engine Status", 14, 10, Color.FromArgb(230, 230, 245));
+            cardStatus.Controls.Add(lblH5);
+
+            Label lblStat1 = CreateBulletLabel("● Low-Latency waveOut Pool (16 Ch Hardware Direct)", 16, 32, Color.FromArgb(16, 185, 129));
+            Label lblStat2 = CreateBulletLabel("● Hook: LowLevelKeyboardProc (Active, <2ms delay)", 16, 54, Color.FromArgb(16, 185, 129));
+            Label lblStat3 = CreateBulletLabel("● System Volume: Completely Independent", 16, 76, Color.FromArgb(16, 185, 129));
+
+            cardStatus.Controls.Add(lblStat1);
+            cardStatus.Controls.Add(lblStat2);
+            cardStatus.Controls.Add(lblStat3);
+
+            rightCol.Controls.Add(cardStatus);
+
+            contentContainer.Controls.Add(rightCol);
+
+            workPanel.Controls.Add(contentContainer);
+            this.Controls.Add(workPanel);
         }
 
-        private void UpdateBadge()
+        private static Label CreateCardHeader(string text, int x, int y, Color c)
         {
-            if (_lblStatusBadge != null)
+            return new Label
             {
-                _lblStatusBadge.Text = Program.IsEnabled ? "● Active" : "● Muted";
-                _lblStatusBadge.ForeColor = Program.IsEnabled ? Color.FromArgb(16, 185, 129) : Color.FromArgb(245, 158, 11);
-            }
+                Text = text,
+                Location = new Point(x, y),
+                ForeColor = c,
+                Font = new Font("Segoe UI", 9.0f, FontStyle.Bold),
+                AutoSize = true
+            };
+        }
+
+        private static Label CreateBulletLabel(string text, int x, int y, Color c)
+        {
+            return new Label
+            {
+                Text = text,
+                Location = new Point(x, y),
+                ForeColor = c,
+                Font = new Font("Segoe UI", 8.25f),
+                AutoSize = true
+            };
+        }
+
+        private static void AddDropdownRow(Panel p, string labelText, string[] items, int selectedIdx, int y)
+        {
+            Label lbl = new Label { Text = labelText, Location = new Point(16, y), ForeColor = Color.FromArgb(210, 210, 230), AutoSize = true, Font = new Font("Segoe UI", 8.5f) };
+            p.Controls.Add(lbl);
+
+            ComboBox cb = CreateDarkComboBox(items, items[selectedIdx], 14, y + 18, 435);
+            p.Controls.Add(cb);
+        }
+
+        private static ComboBox CreateDarkComboBox(string[] items, string defaultItem, int x, int y, int w)
+        {
+            ComboBox cb = new ComboBox
+            {
+                Location = new Point(x, y),
+                Width = w,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                BackColor = Color.FromArgb(24, 19, 38),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 8.5f)
+            };
+            cb.Items.AddRange(items);
+            cb.SelectedItem = defaultItem;
+            return cb;
+        }
+
+        private static Button CreateTitleButton(string text, int x, int y)
+        {
+            Button b = new Button
+            {
+                Text = text,
+                Location = new Point(x, y),
+                Size = new Size(28, 26),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.Transparent,
+                ForeColor = Color.FromArgb(170, 170, 195),
+                Cursor = Cursors.Hand,
+                Font = new Font("Segoe UI", 8.5f)
+            };
+            b.FlatAppearance.BorderSize = 0;
+            b.FlatAppearance.MouseOverBackColor = Color.FromArgb(45, 30, 70);
+            return b;
+        }
+
+        private static StudioPillButton CreateNavButton(string text, int y, bool active)
+        {
+            return new StudioPillButton
+            {
+                Text = text,
+                Location = new Point(6, y),
+                Size = new Size(62, 56),
+                Font = new Font("Segoe UI", 8.0f, FontStyle.Bold),
+                IsActiveTab = active
+            };
         }
 
         public void SyncState()
         {
-            if (_chkEnabled != null)
+            if (_chkMuteAll != null) _chkMuteAll.Checked = !Program.IsEnabled;
+            if (_lblBottomStatus != null)
             {
-                _chkEnabled.Checked = Program.IsEnabled;
+                _lblBottomStatus.Text = Program.IsEnabled ?
+                    "🟣  Mechanical Keyboard Studio Pro - Ready" : "🟠  Mechanical Keyboard Studio Pro - MUTED";
             }
-            UpdateBadge();
+        }
+
+        private void ResetDefaults()
+        {
+            _slMasterVol.Value = 100;
+            _slPitch.Value = 0;
+            foreach (KeyValuePair<string, StudioSlider> kv in _keySliders)
+            {
+                kv.Value.Value = 100;
+            }
+            MessageBox.Show("All audio controls reset to default (100%).", "Mechanical Keyboard", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private static string GetStartupShortcutPath()
@@ -834,40 +1164,16 @@ namespace MechanicalKeyboardApp
             try
             {
                 string lnk = GetStartupShortcutPath();
-                if (enable)
-                {
-                    CreateShortcut(lnk, "AULA F75 Mechanical Keyboard Sounds - AutoStart");
-                }
-                else if (File.Exists(lnk))
-                {
-                    File.Delete(lnk);
-                }
+                if (enable) CreateShortcut(lnk, "AULA F75 Mechanical Keyboard Sounds - AutoStart");
+                else if (File.Exists(lnk)) File.Delete(lnk);
             }
             catch { }
-        }
-
-        private static void CreateDesktopShortcut()
-        {
-            try
-            {
-                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                string lnk = Path.Combine(desktop, "AULA F75 Mechanical Keyboard.lnk");
-                CreateShortcut(lnk, "AULA F75 Mechanical Keyboard");
-                MessageBox.Show("Desktop shortcut created successfully!", "Mechanical Keyboard", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Failed to create shortcut: " + ex.Message, "Mechanical Keyboard", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
         }
 
         private static void CreateShortcut(string shortcutPath, string description)
         {
             string exePath = Path.Combine(Program.BaseDir, "MechanicalKeyboard.exe");
-            if (!File.Exists(exePath))
-            {
-                exePath = Process.GetCurrentProcess().MainModule.FileName;
-            }
+            if (!File.Exists(exePath)) exePath = Process.GetCurrentProcess().MainModule.FileName;
 
             Type shellType = Type.GetTypeFromProgID("WScript.Shell");
             if (shellType != null)
@@ -879,10 +1185,7 @@ namespace MechanicalKeyboardApp
                 shortcut.Description = description;
 
                 string ico = Path.Combine(Program.BaseDir, "app_icon.ico");
-                if (File.Exists(ico))
-                {
-                    shortcut.IconLocation = ico + ",0";
-                }
+                if (File.Exists(ico)) shortcut.IconLocation = ico + ",0";
                 shortcut.Save();
             }
         }
